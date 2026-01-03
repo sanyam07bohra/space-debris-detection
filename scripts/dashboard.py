@@ -1,259 +1,104 @@
-# ============================================================
-# SATELLITE ORBIT VISUALIZATION DASHBOARD (EDUCATIONAL)
-# Author: Team Infinity
-# ============================================================
-
-import streamlit as st
+mport streamlit as st
 import pandas as pd
 import plotly.express as px
-import numpy as np
 import os
+from datetime import datetime
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-st.set_page_config(
-    page_title="Satellite Orbit Visualization",
-    page_icon="🛰️",
-    layout="wide"
-)
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Space Debris Detection", layout="wide", page_icon="🛰️")
 
-st.title("🛰️ Satellite Orbit Visualization Dashboard")
-st.caption("Educational visualization of real satellite orbits using TLE propagation")
+# --- DATA LOADING ---
+@st.cache_data
+def load_data():
+    # Looking for the specific file seen in your screenshot
+    file_path = 'data/collision_risks.csv'
+    
+    if not os.path.exists(file_path):
+        # Try local path if streamlit path fails
+        file_path = 'collision_risks.csv'
 
-# ============================================================
-# SAFE FILE LOADING
-# ============================================================
-BASE_DIR = os.path.dirname(os.path.abspath(_file_))
-DATA_PATH = os.path.join(BASE_DIR, "data", "all_satellite_orbits.csv")
+    try:
+        df = pd.read_csv(file_path)
+        
+        # 1. Handle Dates
+        # Based on typical space data, we look for 'date', 'epoch', or 'time'
+        date_col = next((c for c in df.columns if 'date' in c.lower() or 'time' in c.lower()), None)
+        if date_col:
+            df[date_col] = pd.to_datetime(df[date_col])
+            df = df.sort_values(date_col)
+        
+        # 2. Handle Distance
+        # Your CSV likely uses 'distance' or 'miss_distance'
+        dist_col = next((c for c in df.columns if 'dist' in c.lower()), None)
+        if dist_col:
+            df['dist_display'] = pd.to_numeric(df[dist_col], errors='coerce')
+        else:
+            df['dist_display'] = 0
 
-@st.cache_data(show_spinner=True)
-def load_orbit_data(path):
-    if not os.path.exists(path):
-        return None
+        return df, date_col
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None, None
 
-    df = pd.read_csv(path)
+df, date_column = load_data()
 
-    # Normalize column names (defensive)
-    df.columns = df.columns.str.strip()
+# --- SIDEBAR ---
+st.sidebar.title("Control Panel")
 
-    # Parse timestamps safely
-    if "Time (UTC)" in df.columns:
-        df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], errors="coerce")
+if df is not None:
+    # Auto-adjust Date Range to match your CSV content so you don't get '0 events'
+    min_date = df[date_column].min().to_pydatetime()
+    max_date = df[date_column].max().to_pydatetime()
 
-    # Force numeric columns
-    for col in ["Latitude", "Longitude", "Altitude (m)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Drop fully invalid rows
-    df = df.dropna(subset=["Time (UTC)", "Latitude", "Longitude", "Altitude (m)"])
-
-    return df
-
-df = load_orbit_data(DATA_PATH)
-
-if df is None or df.empty:
-    st.error("❌ Orbit data not found or invalid.")
-    st.stop()
-
-st.success("✅ Orbit data loaded successfully")
-
-# ============================================================
-# SIDEBAR CONTROLS
-# ============================================================
-st.sidebar.header("🔧 Controls")
-
-# ---- Date range ----
-min_date = df["Time (UTC)"].min().date()
-max_date = df["Time (UTC)"].max().date()
-
-date_range = st.sidebar.date_input(
-    "Simulation Date Range",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
-
-if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-    start_date, end_date = date_range
-else:
-    start_date, end_date = min_date, max_date
-
-# ---- Satellite selection ----
-satellites = sorted(df["Satellite Name"].unique())
-selected_sat = st.sidebar.selectbox(
-    "Select Satellite (optional)",
-    ["All Satellites"] + satellites
-)
-
-# ---- Altitude filter ----
-min_alt = float(df["Altitude (m)"].min())
-max_alt = float(df["Altitude (m)"].max())
-
-altitude_range = st.sidebar.slider(
-    "Altitude Range (meters)",
-    min_value=int(min_alt),
-    max_value=int(max_alt),
-    value=(int(min_alt), int(max_alt)),
-    step=1000
-)
-
-# ============================================================
-# DATA FILTERING
-# ============================================================
-filtered_df = df.copy()
-
-# Date filter
-filtered_df = filtered_df[
-    (filtered_df["Time (UTC)"].dt.date >= start_date) &
-    (filtered_df["Time (UTC)"].dt.date <= end_date)
-]
-
-# Satellite filter
-if selected_sat != "All Satellites":
-    filtered_df = filtered_df[filtered_df["Satellite Name"] == selected_sat]
-
-# Altitude filter
-filtered_df = filtered_df[
-    (filtered_df["Altitude (m)"] >= altitude_range[0]) &
-    (filtered_df["Altitude (m)"] <= altitude_range[1])
-]
-
-if filtered_df.empty:
-    st.warning("No data available for selected filters.")
-    st.stop()
-
-# ============================================================
-# TOP METRICS
-# ============================================================
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric("Total Data Points", len(filtered_df))
-c2.metric("Satellites", filtered_df["Satellite Name"].nunique())
-c3.metric("Min Altitude (m)", f"{filtered_df['Altitude (m)'].min():.0f}")
-c4.metric("Max Altitude (m)", f"{filtered_df['Altitude (m)'].max():.0f}")
-
-# ============================================================
-# TABS
-# ============================================================
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["🌍 Global View", "🛰️ Ground Track", "📊 Analysis", "📋 Data"]
-)
-
-# ============================================================
-# TAB 1: GLOBAL DISTRIBUTION
-# ============================================================
-with tab1:
-    st.subheader("Global Satellite Distribution")
-
-    fig_global = px.scatter_geo(
-        filtered_df,
-        lat="Latitude",
-        lon="Longitude",
-        color="Altitude (m)",
-        hover_name="Satellite Name",
-        hover_data=["Time (UTC)", "Altitude (m)"],
-        projection="natural earth",
-        color_continuous_scale="Viridis"
+    selected_dates = st.sidebar.date_input(
+        "Date Range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
     )
 
-    fig_global.update_layout(
-        height=600,
-        margin=dict(l=0, r=0, t=0, b=0)
-    )
+    max_dist = st.sidebar.slider("Max Distance (m)", 0, 10000, 5000)
 
-    st.plotly_chart(fig_global, use_container_width=True)
-
-# ============================================================
-# TAB 2: GROUND TRACK (PATH VISUALIZATION)
-# ============================================================
-with tab2:
-    st.subheader("Satellite Ground Track")
-
-    if selected_sat == "All Satellites":
-        st.info("Select a specific satellite from the sidebar to view its ground track.")
+    # Filtering Logic
+    if len(selected_dates) == 2:
+        mask = (df[date_column].dt.date >= selected_dates[0]) & \
+               (df[date_column].dt.date <= selected_dates[1]) & \
+               (df['dist_display'] <= max_dist)
+        filtered_df = df.loc[mask]
     else:
-        sat_df = filtered_df.sort_values("Time (UTC)")
+        filtered_df = df
+else:
+    st.stop()
 
-        fig_track = px.line_geo(
-            sat_df,
-            lat="Latitude",
-            lon="Longitude",
-            hover_data=["Time (UTC)", "Altitude (m)"],
-            title=f"Ground Track of {selected_sat}"
-        )
+# --- MAIN DASHBOARD ---
+st.title("🛰️ Satellite Collision Risk Dashboard")
 
-        fig_track.update_layout(
-            height=600,
-            margin=dict(l=0, r=0, t=40, b=0)
-        )
+# Top Metrics
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total Events", len(filtered_df))
+m2.metric("Closest Approach", f"{filtered_df['dist_display'].min():.2f}m" if not filtered_df.empty else "N/A")
+m3.metric("Avg Distance", f"{filtered_df['dist_display'].mean():.2f}m" if not filtered_df.empty else "N/A")
+m4.metric("Data Source", "collision_risks.csv")
 
-        st.plotly_chart(fig_track, use_container_width=True)
+# Tabs
+tab1, tab2, tab3 = st.tabs(["📊 Overview", "📈 Analysis", "📋 Raw Data"])
 
-# ============================================================
-# TAB 3: ANALYSIS
-# ============================================================
+with tab1:
+    if not filtered_df.empty:
+        fig = px.scatter(filtered_df, x=date_column, y='dist_display', 
+                         color='dist_display', size_max=10,
+                         title="Collision Risk Timeline",
+                         template="plotly_dark",
+                         labels={'dist_display': 'Distance (meters)'})
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No events found. Try expanding the Date Range in the sidebar.")
+
+with tab2:
+    if not filtered_df.empty:
+        fig2 = px.histogram(filtered_df, x='dist_display', nbins=20, 
+                            title="Distance Distribution", template="plotly_dark")
+        st.plotly_chart(fig2, use_container_width=True)
+
 with tab3:
-    st.subheader("Orbital Analysis")
-
-    colA, colB = st.columns(2)
-
-    with colA:
-        st.markdown("### Altitude vs Time")
-
-        fig_alt_time = px.line(
-            filtered_df.sort_values("Time (UTC)"),
-            x="Time (UTC)",
-            y="Altitude (m)",
-            color="Satellite Name",
-            labels={"Altitude (m)": "Altitude (meters)"}
-        )
-
-        st.plotly_chart(fig_alt_time, use_container_width=True)
-
-    with colB:
-        st.markdown("### Altitude Distribution")
-
-        fig_alt_hist = px.histogram(
-            filtered_df,
-            x="Altitude (m)",
-            nbins=30,
-            title="Altitude Histogram"
-        )
-
-        st.plotly_chart(fig_alt_hist, use_container_width=True)
-
-# ============================================================
-# TAB 4: RAW DATA
-# ============================================================
-with tab4:
-    st.subheader("Orbit Data Table")
-
-    show_cols = [
-        "Satellite Name",
-        "Time (UTC)",
-        "Latitude",
-        "Longitude",
-        "Altitude (m)"
-    ]
-
-    st.dataframe(
-        filtered_df[show_cols],
-        use_container_width=True
-    )
-
-    st.download_button(
-        "📥 Download Filtered Data",
-        filtered_df.to_csv(index=False),
-        file_name="filtered_orbit_data.csv",
-        mime="text/csv"
-    )
-
-# ============================================================
-# FOOTER
-# ============================================================
-st.markdown("---")
-st.caption(
-    "Data source: Celestrak | Orbit propagation: Skyfield | Visualization: Plotly + Streamlit"
-)
+    st.dataframe(filtered_df, use_container_width=True)
