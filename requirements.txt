@@ -2,3 +2,4 @@ skyfield
 numpy
 pandas
 matplotlib
+streamlit
