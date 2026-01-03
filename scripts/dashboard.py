@@ -1,401 +1,259 @@
+# ============================================================
+# SATELLITE ORBIT VISUALIZATION DASHBOARD (EDUCATIONAL)
+# Author: Team Infinity
+# ============================================================
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+import os
 
-# === Page & Layout ======
-st.set_page_config(page_title="Satellite Collision Risk Dashboard", layout="wide")
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+st.set_page_config(
+    page_title="Satellite Orbit Visualization",
+    page_icon="🛰️",
+    layout="wide"
+)
 
-# === Load Data ===
-# Robust read with parse_dates; if something goes wrong, fail gracefully.
-try:
-    df = pd.read_csv("../data/persistent_risks.csv", parse_dates=["Timestamp"])
-except Exception as e:
-    st.error(f"Failed to read CSV: {e}")
-    df = pd.DataFrame(
-        columns=[
-            "Timestamp", "Satellite 1", "Satellite 2", "Distance (m)",
-            "Latitude", "Longitude", "Avg Altitude", "Risk Score"
-        ]
-    )
+st.title("🛰️ Satellite Orbit Visualization Dashboard")
+st.caption("Educational visualization of real satellite orbits using TLE propagation")
 
-# Ensure expected columns exist (prevents KeyErrors later)
-for col in ["Satellite 1", "Satellite 2", "Distance (m)", "Latitude", "Longitude", "Avg Altitude", "Risk Score"]:
-    if col not in df.columns:
-        df[col] = np.nan
+# ============================================================
+# SAFE FILE LOADING
+# ============================================================
+BASE_DIR = os.path.dirname(os.path.abspath(_file_))
+DATA_PATH = os.path.join(BASE_DIR, "data", "all_satellite_orbits.csv")
 
-# === Style ===
-st.markdown("""
-    <style>
-    /* Reduce main padding inside content block */
-    .block-container {
-        padding-top: 0.75rem;
-        padding-bottom: 0.75rem;
-        padding-left: 0.75rem;
-        padding-right: 0.75rem;
-    }
-    /* Compact title spacing */
-    h1 { margin-bottom: 0.4rem; }
-    /* KPI card look for metrics row */
-    .kpi-card {
-        background: #ffffff;
-        border-radius: 10px;
-        padding: 12px 14px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        border: 1px solid rgba(0,0,0,0.06);
-    }
-    .kpi-label {
-        font-size: 13px;
-        color:  rgb(0,0,0);
-        margin-bottom: 6px;
-    }
-    .kpi-value {
-        font-size: 22px;
-        font-weight: 600;
-        line-height: 1.2;
-        color: rgb(0,0,0);
-    }
-    /* Smaller table header text */
-    .stDataFrame table thead th { font-size: 12px; }
-    </style>
-""", unsafe_allow_html=True)
+@st.cache_data(show_spinner=True)
+def load_orbit_data(path):
+    if not os.path.exists(path):
+        return None
 
-# === Labels / Colors ===
-color_map = {
-    "Critical": "red",
-    "High": "orange",
-    "Medium": "yellow",
-    "Low": "green"
-}
+    df = pd.read_csv(path)
 
-# === Risk Level Categorization ===
-def categorize_risk(score):
-    try:
-        if pd.isna(score):
-            return "Low"
-        if score > 0.01:
-            return "Critical"
-        elif score > 0.005:
-            return "High"
-        elif score > 0.001:
-            return "Medium"
-        else:
-            return "Low"
-    except Exception:
-        return "Low"
+    # Normalize column names (defensive)
+    df.columns = df.columns.str.strip()
 
-df["Risk Level"] = df["Risk Score"].apply(categorize_risk)
+    # Parse timestamps safely
+    if "Time (UTC)" in df.columns:
+        df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], errors="coerce")
 
-# === Sidebar Controls ===
-st.sidebar.header("🔧 Control Panel")
+    # Force numeric columns
+    for col in ["Latitude", "Longitude", "Altitude (m)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Date range filter (defensive for empty data)
-if df["Timestamp"].notna().any():
-    min_date = df["Timestamp"].min().date()
-    max_date = df["Timestamp"].max().date()
-else:
-    # fallback for empty/invalid timestamp data
-    today = pd.Timestamp.today().date()
-    min_date = today
-    max_date = today
+    # Drop fully invalid rows
+    df = df.dropna(subset=["Time (UTC)", "Latitude", "Longitude", "Altitude (m)"])
 
-date_range = st.sidebar.date_input("Date Range", [min_date, max_date])
-# Streamlit can return a single date or a tuple of two dates; normalize to (start, end)
+    return df
+
+df = load_orbit_data(DATA_PATH)
+
+if df is None or df.empty:
+    st.error("❌ Orbit data not found or invalid.")
+    st.stop()
+
+st.success("✅ Orbit data loaded successfully")
+
+# ============================================================
+# SIDEBAR CONTROLS
+# ============================================================
+st.sidebar.header("🔧 Controls")
+
+# ---- Date range ----
+min_date = df["Time (UTC)"].min().date()
+max_date = df["Time (UTC)"].max().date()
+
+date_range = st.sidebar.date_input(
+    "Simulation Date Range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date
+)
+
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_date, end_date = date_range
 else:
-    start_date = date_range if date_range else min_date
-    end_date = date_range if date_range else max_date
+    start_date, end_date = min_date, max_date
 
-# Distance threshold - updates filter immediately when moved
-max_dist = st.sidebar.slider("Max Distance (m)", 100, 5000, 500, step=100)
-st.sidebar.caption("Only events within this distance will be shown (max precomputed = 5000 m)")
-
-# Risk level selection
-risk_levels = st.sidebar.multiselect(
-    "Risk Categories",
-    ["Critical", "High", "Medium", "Low"],
-    default=["Critical", "High", "Medium"]
+# ---- Satellite selection ----
+satellites = sorted(df["Satellite Name"].unique())
+selected_sat = st.sidebar.selectbox(
+    "Select Satellite (optional)",
+    ["All Satellites"] + satellites
 )
 
-# OPTIONAL: satellite quick search to help narrow (doesn't remove any prior feature)
-sat_query = st.sidebar.text_input("Satellite name contains (optional)").strip()
+# ---- Altitude filter ----
+min_alt = float(df["Altitude (m)"].min())
+max_alt = float(df["Altitude (m)"].max())
 
-# === Filter Data (defensive to avoid crashes on NaNs/NaT) ===
+altitude_range = st.sidebar.slider(
+    "Altitude Range (meters)",
+    min_value=int(min_alt),
+    max_value=int(max_alt),
+    value=(int(min_alt), int(max_alt)),
+    step=1000
+)
+
+# ============================================================
+# DATA FILTERING
+# ============================================================
 filtered_df = df.copy()
-if not filtered_df.empty:
-    # Date filter (skip rows with NaT)
-    if "Timestamp" in filtered_df.columns:
-        mask_date = (
-            filtered_df["Timestamp"].notna()
-            & (filtered_df["Timestamp"].dt.date >= start_date)
-            & (filtered_df["Timestamp"].dt.date <= end_date)
-        )
-        filtered_df = filtered_df[mask_date]
 
-    # Distance filter (NaNs treated as very large -> excluded)
-    filtered_df = filtered_df[filtered_df["Distance (m)"].fillna(1e12) <= max_dist]
+# Date filter
+filtered_df = filtered_df[
+    (filtered_df["Time (UTC)"].dt.date >= start_date) &
+    (filtered_df["Time (UTC)"].dt.date <= end_date)
+]
 
-    # Risk level filter
-    filtered_df = filtered_df[filtered_df["Risk Level"].isin(risk_levels)]
+# Satellite filter
+if selected_sat != "All Satellites":
+    filtered_df = filtered_df[filtered_df["Satellite Name"] == selected_sat]
 
-    # Satellite query (optional)
-    if sat_query:
-        mask_sat = (
-            filtered_df["Satellite 1"].astype(str).str.contains(sat_query, case=False, na=False) |
-            filtered_df["Satellite 2"].astype(str).str.contains(sat_query, case=False, na=False)
-        )
-        filtered_df = filtered_df[mask_sat]
+# Altitude filter
+filtered_df = filtered_df[
+    (filtered_df["Altitude (m)"] >= altitude_range[0]) &
+    (filtered_df["Altitude (m)"] <= altitude_range[1])
+]
 
-# === Top Summary ===
-st.title("Satellite Collision Risk Dashboard")
+if filtered_df.empty:
+    st.warning("No data available for selected filters.")
+    st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Visualisations", "Analysis", "Logs"])
+# ============================================================
+# TOP METRICS
+# ============================================================
+c1, c2, c3, c4 = st.columns(4)
 
-#===============================================================
-# Tab 1: Overview (compact & safe KPIs, map + pie side-by-side)
+c1.metric("Total Data Points", len(filtered_df))
+c2.metric("Satellites", filtered_df["Satellite Name"].nunique())
+c3.metric("Min Altitude (m)", f"{filtered_df['Altitude (m)'].min():.0f}")
+c4.metric("Max Altitude (m)", f"{filtered_df['Altitude (m)'].max():.0f}")
+
+# ============================================================
+# TABS
+# ============================================================
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["🌍 Global View", "🛰️ Ground Track", "📊 Analysis", "📋 Data"]
+)
+
+# ============================================================
+# TAB 1: GLOBAL DISTRIBUTION
+# ============================================================
 with tab1:
-    # --- KPIs (ALWAYS render; handle empties safely) ---
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("Global Satellite Distribution")
 
-    total_events = int(len(filtered_df)) if not filtered_df.empty else 0
-    critical_events = int((filtered_df["Risk Level"] == "Critical").sum()) if not filtered_df.empty else 0
+    fig_global = px.scatter_geo(
+        filtered_df,
+        lat="Latitude",
+        lon="Longitude",
+        color="Altitude (m)",
+        hover_name="Satellite Name",
+        hover_data=["Time (UTC)", "Altitude (m)"],
+        projection="natural earth",
+        color_continuous_scale="Viridis"
+    )
 
-    # Closest approach (safe formatting)
-    closest_val = filtered_df["Distance (m)"].min() if not filtered_df.empty else np.nan
-    closest_text = f"{closest_val:.2f} m" if pd.notna(closest_val) else "—"
+    fig_global.update_layout(
+        height=600,
+        margin=dict(l=0, r=0, t=0, b=0)
+    )
 
-    # Unique satellites involved (drop NaNs, union both columns)
-    if not filtered_df.empty:
-        s1 = set(filtered_df["Satellite 1"].dropna().astype(str))
-        s2 = set(filtered_df["Satellite 2"].dropna().astype(str))
-        unique_sats = len(s1.union(s2))
-    else:
-        unique_sats = 0
+    st.plotly_chart(fig_global, use_container_width=True)
 
-
-    with col1:
-        st.markdown('<div class="kpi-card"><div class="kpi-label">Total Events</div><div class="kpi-value">{}</div></div>'.format(total_events), unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="kpi-card"><div class="kpi-label">Critical Events</div><div class="kpi-value">{}</div></div>'.format(critical_events), unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="kpi-card"><div class="kpi-label">Closest Approach</div><div class="kpi-value">{}</div></div>'.format(closest_text), unsafe_allow_html=True)
-    with col4:
-        st.markdown('<div class="kpi-card"><div class="kpi-label">Unique Satellites at Risk</div><div class="kpi-value">{}</div></div>'.format(unique_sats), unsafe_allow_html=True)
-
-    st.write("")  # small spacer
-
-    # --- Map + Pie side-by-side to save vertical space ---
-    map_col, pie_col = st.columns([2, 1], gap="large")
-
-    with map_col:
-        st.markdown("#### Risk Event Map")
-        map_df = filtered_df.dropna(subset=["Latitude", "Longitude"]) if not filtered_df.empty else filtered_df
-        if map_df.empty:
-            st.info("No geolocated events for current filters.")
-        else:
-            fig_map = px.scatter_geo(
-                map_df,
-                lat="Latitude",
-                lon="Longitude",
-                color="Risk Level",
-                size="Risk Score",
-                hover_name="Satellite 1",
-                hover_data=["Satellite 2", "Timestamp", "Distance (m)", "Risk Score"],
-                projection="natural earth",
-                color_discrete_map=color_map
-            )
-            st.plotly_chart(fig_map, use_container_width=True)
-
-    with pie_col:
-        st.markdown("#### Risk Distribution")
-        if filtered_df.empty:
-            st.info("No events to build distribution.")
-        else:
-            pie_data = (
-                filtered_df["Risk Level"]
-                .value_counts()
-                .rename_axis("Risk Level")
-                .reset_index(name="Count")
-            )
-            fig_pie = px.pie(
-                pie_data,
-                values="Count",
-                names="Risk Level",
-                color="Risk Level",
-                title="Risk Level Distribution",
-                color_discrete_map=color_map
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-#===============================================================
-# Tab 2: Visualisations (no functionality removed)
+# ============================================================
+# TAB 2: GROUND TRACK (PATH VISUALIZATION)
+# ============================================================
 with tab2:
-    st.markdown("#### Visualisation Dashboard")
+    st.subheader("Satellite Ground Track")
 
-    sub_tab = st.radio("Select Section", ["Event Timeline", "Altitude v/s Distance", "Most Involved Satellite"], horizontal=True)
+    if selected_sat == "All Satellites":
+        st.info("Select a specific satellite from the sidebar to view its ground track.")
+    else:
+        sat_df = filtered_df.sort_values("Time (UTC)")
 
-    if sub_tab == "Event Timeline":
-        with st.expander("View Event Timeline", expanded=True):
-            st.subheader("📊 Events Over Time")
-            if filtered_df.empty:
-                st.info("No events for current filters.")
-            else:
-                bar_data = (
-                    filtered_df
-                    .groupby(filtered_df["Timestamp"].dt.floor("h"))
-                    .size()
-                    .reset_index(name="Events")
-                    .sort_values("Timestamp")
-                )
-                fig_bar = px.bar(
-                    bar_data,
-                    x="Timestamp",
-                    y="Events",
-                    title="Events Over Time",
-                    labels={"Events": "Number of Events"}
-                )
-                # Add moving average trendline (2-hour window)
-                if len(bar_data) >= 2:
-                    fig_bar.add_scatter(
-                        x=bar_data["Timestamp"],
-                        y=bar_data["Events"].rolling(window=2, min_periods=1).mean(),
-                        mode="lines",
-                        name="2-hour Moving Average",
-                        line=dict(dash="dash")
-                    )
-                st.plotly_chart(fig_bar, use_container_width=True)
+        fig_track = px.line_geo(
+            sat_df,
+            lat="Latitude",
+            lon="Longitude",
+            hover_data=["Time (UTC)", "Altitude (m)"],
+            title=f"Ground Track of {selected_sat}"
+        )
 
-    elif sub_tab == "Altitude v/s Distance":
-        with st.expander("View Altitude vs Distance Chart", expanded=True):
-            st.subheader("Altitude vs Distance")
-            if filtered_df.empty:
-                st.info("No events to plot.")
-            else:
-                fig_alt = px.scatter(
-                    filtered_df,
-                    x="Distance (m)",
-                    y="Avg Altitude",
-                    color="Risk Level",
-                    color_discrete_map=color_map,
-                    hover_data=["Satellite 1", "Satellite 2", "Timestamp"],
-                    title="Distance vs Altitude"
-                )
-                # Visual bands for distance zones (transparent)
-                fig_alt.update_layout(
-                    shapes=[
-                        dict(type="rect", xref="x", yref="paper", x0=0,    x1=500,  y0=0, y1=1, fillcolor="rgba(255,0,0,0.06)",   line_width=0),
-                        dict(type="rect", xref="x", yref="paper", x0=500,  x1=1000, y0=0, y1=1, fillcolor="rgba(255,165,0,0.06)", line_width=0),
-                        dict(type="rect", xref="x", yref="paper", x0=1000, x1=3000, y0=0, y1=1, fillcolor="rgba(255,215,0,0.06)", line_width=0),
-                        dict(type="rect", xref="x", yref="paper", x0=3000, x1=5000, y0=0, y1=1, fillcolor="rgba(0,128,0,0.04)",   line_width=0),
-                    ]
-                )
-                st.plotly_chart(fig_alt, use_container_width=True)
+        fig_track.update_layout(
+            height=600,
+            margin=dict(l=0, r=0, t=40, b=0)
+        )
 
-    elif sub_tab == "Most Involved Satellite":
-        st.subheader("Satellite name v/s Count")
-        if filtered_df.empty:
-            st.info("No events to compute counts.")
-        else:
-            all_sats = pd.concat([filtered_df["Satellite 1"], filtered_df["Satellite 2"]]).fillna("Unknown")
-            top_sats = all_sats.value_counts().nlargest(10).reset_index()
-            top_sats.columns = ["Satellite", "Count"]
-            fig_sat = px.bar(top_sats, x="Count", y="Satellite", orientation='h', title="Most Involved Satellites")
-            st.plotly_chart(fig_sat, use_container_width=True)
+        st.plotly_chart(fig_track, use_container_width=True)
 
-        # === Closest Encounter Card (across full dataset; safe if empty) ===
-        if df["Distance (m)"].notna().any():
-            try:
-                closest_idx = df["Distance (m)"].idxmin()
-                closest_row = df.loc[closest_idx]
-                st.info(f"*Closest Encounter:* {closest_row['Satellite 1']} ↔ {closest_row['Satellite 2']} at {closest_row['Timestamp']} — {closest_row['Distance (m)']:.2f} m")
-            except Exception:
-                st.info("Closest Encounter: data not sufficient.")
-        else:
-            st.info("Closest Encounter: data not available.")
-
-#===============================================================
-# Tab 3: Analysis (same tools retained)
+# ============================================================
+# TAB 3: ANALYSIS
+# ============================================================
 with tab3:
-    st.markdown("#### Analysis Dashboard")
+    st.subheader("Orbital Analysis")
 
-    sub_tab = st.radio("Select Section", ["Satellite Risk Timeline", "Hourly Risk Heatmap", "Satellite Encounter Filter"], horizontal=True)
+    colA, colB = st.columns(2)
 
-    if sub_tab == "Satellite Risk Timeline":
-        st.subheader("Satellite Risk Timeline")
-        sat_options = sorted(set(df["Satellite 1"].dropna().astype(str)).union(set(df["Satellite 2"].dropna().astype(str))))
-        selected_sat = st.selectbox("Select Satellite", sat_options)
-        sat_df = df[(df["Satellite 1"] == selected_sat) | (df["Satellite 2"] == selected_sat)]
+    with colA:
+        st.markdown("### Altitude vs Time")
 
-        if not sat_df.empty:
-            fig_line = px.line(
-                sat_df.sort_values("Timestamp"),
-                x="Timestamp",
-                y="Distance (m)",
-                color="Risk Level",
-                title=f"Risk Timeline for {selected_sat}",
-                color_discrete_map=color_map
-            )
-            st.plotly_chart(fig_line, use_container_width=True)
-            st.download_button("Download Satellite Timeline", sat_df.to_csv(index=False), f"{selected_sat}_timeline.csv", "text/csv")
-        else:
-            st.warning("No events found for selected satellite.")
+        fig_alt_time = px.line(
+            filtered_df.sort_values("Time (UTC)"),
+            x="Time (UTC)",
+            y="Altitude (m)",
+            color="Satellite Name",
+            labels={"Altitude (m)": "Altitude (meters)"}
+        )
 
-    elif sub_tab == "Hourly Risk Heatmap":
-        st.subheader("Hourly Risk Heatmap")
-        if filtered_df.empty:
-            st.info("No events for current filters.")
-        else:
-            heat_df = filtered_df.copy()
-            heat_df["Hour"] = heat_df["Timestamp"].dt.hour
-            heat_counts = heat_df.groupby(["Hour", "Risk Level"]).size().unstack().fillna(0)
+        st.plotly_chart(fig_alt_time, use_container_width=True)
 
-            st.write("### Event Frequency by Hour & Risk Level")
-            st.dataframe(heat_counts)
+    with colB:
+        st.markdown("### Altitude Distribution")
 
-            fig_heat = px.imshow(
-                heat_counts.T,
-                labels=dict(x="Hour of Day", y="Risk Level", color="Event Count"),
-                x=heat_counts.index,
-                y=heat_counts.columns,
-                color_continuous_scale="YlOrRd"
-            )
-            st.plotly_chart(fig_heat, use_container_width=True)
+        fig_alt_hist = px.histogram(
+            filtered_df,
+            x="Altitude (m)",
+            nbins=30,
+            title="Altitude Histogram"
+        )
 
-    elif sub_tab == "Satellite Encounter Filter":
-        st.subheader("🛰️ Satellite Encounter Filter")
-        sat1 = st.selectbox("Satellite A", sorted(df["Satellite 1"].dropna().astype(str).unique()))
-        sat2 = st.selectbox("Satellite B", sorted(df["Satellite 2"].dropna().astype(str).unique()))
+        st.plotly_chart(fig_alt_hist, use_container_width=True)
 
-        proximity_df = df[
-            ((df["Satellite 1"] == sat1) & (df["Satellite 2"] == sat2)) |
-            ((df["Satellite 1"] == sat2) & (df["Satellite 2"] == sat1))
-        ]
-
-        if not proximity_df.empty:
-            fig_pair = px.line(
-                proximity_df.sort_values("Timestamp"),
-                x="Timestamp", y="Distance (m)",
-                title=f"Proximity between {sat1} and {sat2}",
-                markers=True
-            )
-            st.plotly_chart(fig_pair, use_container_width=True)
-        else:
-            st.info("No close encounters found between the selected satellites.")
-
-#===============================================================
-# Tab 4: Logs (unchanged core, just compact)
+# ============================================================
+# TAB 4: RAW DATA
+# ============================================================
 with tab4:
-    st.subheader("📋 Detailed Event Log")
-    # Show only selected, core columns but keep others accessible
-    cols_to_show = [
-        "Timestamp", "Satellite 1", "Satellite 2", "Distance (m)", "Risk Level",
-        "Latitude", "Longitude", "Avg Altitude", "Risk Score"
+    st.subheader("Orbit Data Table")
+
+    show_cols = [
+        "Satellite Name",
+        "Time (UTC)",
+        "Latitude",
+        "Longitude",
+        "Altitude (m)"
     ]
-    # Some datasets may miss a column if badly formatted; filter to existing ones:
-    cols_to_show = [c for c in cols_to_show if c in filtered_df.columns]
 
-    st.dataframe(filtered_df[cols_to_show], use_container_width=True)
+    st.dataframe(
+        filtered_df[show_cols],
+        use_container_width=True
+    )
 
-# === Export Button (kept as in your code) ===
-st.download_button("📥 Download Filtered Data", filtered_df.to_csv(index=False), "filtered_events.csv", "text/csv")
+    st.download_button(
+        "📥 Download Filtered Data",
+        filtered_df.to_csv(index=False),
+        file_name="filtered_orbit_data.csv",
+        mime="text/csv"
+    )
+
+# ============================================================
+# FOOTER
+# ============================================================
+st.markdown("---")
+st.caption(
+    "Data source: Celestrak | Orbit propagation: Skyfield | Visualization: Plotly + Streamlit"
+)
